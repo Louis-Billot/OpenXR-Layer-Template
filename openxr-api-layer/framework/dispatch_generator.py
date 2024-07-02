@@ -39,7 +39,7 @@ from xrconventions import OpenXRConventions
 import layer_apis
 
 # Sanity checks on the configuration file
-for func in ['xrCreateInstance', 'xrDestroyInstance', 'xrEnumerateInstanceExtensionProperties']:
+for func in ['xrCreateInstance', 'xrDestroyInstance', 'xrEnumerateInstanceExtensionProperties', 'xrEnumerateApiLayerProperties']:
     if func in layer_apis.override_functions:
         raise Exception("{func}() is implicitly overriden and shall not be specified in override_functions. Use the {func}() virtual method.")
     if func in layer_apis.requested_functions:
@@ -153,7 +153,7 @@ namespace openxr_api_layer
         generated = ''
 
         for cur_cmd in self.core_commands + self.ext_commands:
-            if cur_cmd.name in (layer_apis.override_functions + ['xrDestroyInstance', 'xrEnumerateInstanceExtensionProperties']):
+            if cur_cmd.name in (layer_apis.override_functions + ['xrDestroyInstance']):
                 parameters_list = self.makeParametersList(cur_cmd)
                 arguments_list = self.makeArgumentsList(cur_cmd)
 
@@ -235,11 +235,6 @@ namespace openxr_api_layer
     def genGetInstanceProcAddr(self):
         generated = '''	XrResult OpenXrApi::xrGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function)
 	{
-		return xrGetInstanceProcAddrInternal(instance, name, function);
-	}
-
-	XrResult OpenXrApi::xrGetInstanceProcAddrInternal(XrInstance instance, const char* name, PFN_xrVoidFunction* function)
-	{
 		XrResult result = m_xrGetInstanceProcAddr(instance, name, function);
 
 		const std::string apiName(name);
@@ -252,7 +247,7 @@ namespace openxr_api_layer
 '''
 
         for cur_cmd in self.core_commands:
-            if cur_cmd.name in layer_apis.override_functions + ['xrEnumerateInstanceExtensionProperties']:
+            if cur_cmd.name in layer_apis.override_functions:
                 generated += f'''		else if (apiName == "{cur_cmd.name}")
 		{{
 			m_{cur_cmd.name} = reinterpret_cast<PFN_{cur_cmd.name}>(*function);
@@ -344,49 +339,10 @@ namespace openxr_api_layer
 			return finalDestroyInstance(instance);
 		}
 
-		// Make sure we enumerate the layer's extensions, specifically when another API layer may resolve our implementation
-		// of xrEnumerateInstanceExtensionProperties() instead of the loaders.
-		virtual XrResult xrEnumerateInstanceExtensionProperties(const char* layerName,
-																uint32_t propertyCapacityInput,
-																uint32_t* propertyCountOutput,
-																XrExtensionProperties* properties) {
-			XrResult result = XR_ERROR_RUNTIME_FAILURE;
-			if (!layerName || std::string_view(layerName) != LAYER_NAME) {
-				result = m_xrEnumerateInstanceExtensionProperties(layerName, propertyCapacityInput, propertyCountOutput, properties);
-			}
-
-			if (XR_SUCCEEDED(result)) {
-				if (!layerName || std::string_view(layerName) == LAYER_NAME) {
-					const uint32_t baseOffset = *propertyCountOutput;
-					*propertyCountOutput += (uint32_t)advertisedExtensions.size();
-					if (propertyCapacityInput) {
-						if (propertyCapacityInput < *propertyCountOutput) {
-							result = XR_ERROR_SIZE_INSUFFICIENT;
-						} else {
-							result = XR_SUCCESS;
-							for (uint32_t i = baseOffset; i < *propertyCountOutput; i++) {
-								if (properties[i].type != XR_TYPE_EXTENSION_PROPERTIES) {
-									result = XR_ERROR_VALIDATION_FAILURE;
-									break;
-								}
-
-								strcpy_s(properties[i].extensionName, advertisedExtensions[i - baseOffset].first.c_str());
-								properties[i].extensionVersion = advertisedExtensions[i - baseOffset].second;
-							}
-						}
-					}
-				}
-			}
-
-			return result;
-		}
-
 	private:
-		XrResult xrGetInstanceProcAddrInternal(XrInstance instance, const char* name, PFN_xrVoidFunction* function);
 		friend XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function);
 
 		PFN_xrDestroyInstance m_xrDestroyInstance{nullptr};
-		PFN_xrEnumerateInstanceExtensionProperties m_xrEnumerateInstanceExtensionProperties{nullptr};
 '''
         write(preamble, file=self.outFile)
 

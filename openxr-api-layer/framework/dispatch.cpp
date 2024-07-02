@@ -27,6 +27,9 @@
 #include "dispatch.h"
 #include "log.h"
 
+#define THISLAYER_VERSION 1
+#define THISLAYER_DESC "An API layer template"
+
 using namespace openxr_api_layer::log;
 
 namespace openxr_api_layer {
@@ -163,19 +166,130 @@ namespace openxr_api_layer {
         return result;
     }
 
+    // Report this layer extensions properties
+    XrResult XRAPI_CALL xrEnumerateInstanceExtensionProperties(const char* layerName, uint32_t propertyCapacityInput, uint32_t* propertyCountOutput, XrExtensionProperties* properties)
+    {
+        TraceLocalActivity(local);
+        TraceLoggingWriteStart(local, "xrEnumerateInstanceExtensionProperties");
+
+        XrResult result{XR_SUCCESS};
+        try
+        {
+            if (nullptr == propertyCountOutput || !layerName || std::string_view(layerName) != LAYER_NAME) {
+                result = XR_ERROR_VALIDATION_FAILURE;
+            } else {
+                uint32_t num_extension_properties = static_cast<uint32_t>(advertisedExtensions.size());
+                if (propertyCapacityInput == 0) {
+                    *propertyCountOutput = num_extension_properties;
+                } else if (nullptr != properties) {
+                    if (propertyCapacityInput < num_extension_properties) {
+                        result = XR_ERROR_SIZE_INSUFFICIENT;
+                    } else {
+                        // All parameters are valid, proceed to fill the data
+                        uint32_t idx = 0;
+                        for (const auto [extName, extVersion] : advertisedExtensions) {
+                            XrExtensionProperties extProperty{XR_TYPE_EXTENSION_PROPERTIES};
+                            strcpy(extProperty.extensionName, extName.c_str());
+                            extProperty.extensionVersion = extVersion;
+                            properties[idx] = extProperty;
+                            idx++;
+                        }
+                        *propertyCountOutput = num_extension_properties;
+                    }
+                } else {
+                    result = XR_ERROR_VALIDATION_FAILURE;
+                }
+            }
+        }
+        catch (std::exception& exc)
+        {
+            TraceLoggingWriteTagged(local, "xrEnumerateInstanceExtensionProperties_Error", TLArg(exc.what(), "Error"));
+            ErrorLog(fmt::format("xrEnumerateInstanceExtensionProperties: {}\n", exc.what()));
+            result = XR_ERROR_RUNTIME_FAILURE;
+        }
+
+        TraceLoggingWriteStop(local, "xrEnumerateInstanceExtensionProperties", TLArg(xr::ToCString(result), "Result"));
+        if (XR_FAILED(result)) {
+            ErrorLog(fmt::format("xrEnumerateInstanceExtensionProperties failed with {}\n", xr::ToCString(result)));
+        }
+
+        return result;
+    }
+
+    // Report this layer properties
+    XrResult XRAPI_CALL xrEnumerateApiLayerProperties(uint32_t propertyCapacityInput, uint32_t *propertyCountOutput, XrApiLayerProperties *properties)
+    {
+        TraceLocalActivity(local);
+        TraceLoggingWriteStart(local, "xrEnumerateApiLayerProperties");
+
+        XrResult result{XR_SUCCESS};
+        try
+        {
+            if (nullptr == propertyCountOutput) {
+                result = XR_ERROR_VALIDATION_FAILURE;
+            } else {
+                uint32_t num_layer_properties{1};
+                if (propertyCapacityInput == 0) {
+                    *propertyCountOutput = num_layer_properties;
+                } else if (nullptr != properties) {
+                    if (propertyCapacityInput < num_layer_properties) {
+                        return XR_ERROR_SIZE_INSUFFICIENT;
+                    } else {
+                        // All parameters are valid, proceed to fill the data
+                        XrApiLayerProperties layerProp{XR_TYPE_API_LAYER_PROPERTIES};
+                        layerProp.next = nullptr;
+                        strncpy(layerProp.layerName, LAYER_NAME, XR_MAX_API_LAYER_NAME_SIZE - 1);
+                        if (std::string_view(LAYER_NAME).size() >= XR_MAX_API_LAYER_NAME_SIZE - 1) {
+                            layerProp.layerName[XR_MAX_API_LAYER_NAME_SIZE - 1] = '\0';
+                        }
+                        // TODO: define THISLAYER_DESC and THISLAYER_VERSION based on the manifest.json
+                        strncpy(layerProp.description, THISLAYER_DESC, XR_MAX_API_LAYER_DESCRIPTION_SIZE - 1);
+                        if (std::string_view(THISLAYER_DESC).size() >= XR_MAX_API_LAYER_DESCRIPTION_SIZE - 1) {
+                            layerProp.description[XR_MAX_API_LAYER_DESCRIPTION_SIZE - 1] = '\0';
+                        }
+                        layerProp.layerVersion = THISLAYER_VERSION;
+                        layerProp.specVersion = XR_MAKE_VERSION(1, 0, XR_VERSION_PATCH(XR_CURRENT_API_VERSION));
+                        properties[0] = layerProp;
+
+                        *propertyCountOutput = num_layer_properties;
+                    }
+                } else {
+                    result = XR_ERROR_VALIDATION_FAILURE;
+                }
+            }
+        }
+        catch (std::exception& exc)
+        {
+            TraceLoggingWriteTagged(local, "xrEnumerateApiLayerProperties_Error", TLArg(exc.what(), "Error"));
+            ErrorLog(fmt::format("xrEnumerateApiLayerProperties: {}\n", exc.what()));
+            result = XR_ERROR_RUNTIME_FAILURE;
+        }
+
+        TraceLoggingWriteStop(local, "xrEnumerateApiLayerProperties", TLArg(xr::ToCString(result), "Result"));
+        if (XR_FAILED(result)) {
+            ErrorLog(fmt::format("xrEnumerateApiLayerProperties failed with {}\n", xr::ToCString(result)));
+        }
+
+        return result;
+    }
+
     // Forward the xrGetInstanceProcAddr() call to the dispatcher.
     XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const char* name, PFN_xrVoidFunction* function) {
         TraceLocalActivity(local);
         TraceLoggingWriteStart(local, "xrGetInstanceProcAddr");
 
-        XrResult result;
+        XrResult result{XR_ERROR_FUNCTION_UNSUPPORTED};
         try {
-            if (std::string_view(name) != "xrEnumerateInstanceExtensionProperties") {
+            if (name && std::string_view(name) == "xrEnumerateInstanceExtensionProperties") {
+                // Always call the layer implementation of xrEnumerateInstanceExtensionProperties
+                *function = reinterpret_cast<PFN_xrVoidFunction>(openxr_api_layer::xrEnumerateInstanceExtensionProperties);
+                result = XR_SUCCESS;
+            } else if (name && std::string_view(name) == "xrEnumerateApiLayerProperties") {
+                // Always call the layer implementation of xrEnumerateApiLayerProperties
+                *function = reinterpret_cast<PFN_xrVoidFunction>(openxr_api_layer::xrEnumerateApiLayerProperties);
+                result = XR_SUCCESS;
+            } else if (instance != XR_NULL_HANDLE && name != nullptr) {
                 result = openxr_api_layer::GetInstance()->xrGetInstanceProcAddr(instance, name, function);
-            } else {
-                // We must always call our xrEnumerateInstanceExtensionProperties() override in order to be consistent
-                // with the list of extensions defined in our JSON.
-                result = openxr_api_layer::GetInstance()->xrGetInstanceProcAddrInternal(instance, name, function);
             }
         } catch (std::exception& exc) {
             TraceLoggingWriteTagged(local, "xrGetInstanceProcAddr_Error", TLArg(exc.what(), "Error"));
