@@ -31,6 +31,24 @@ using namespace openxr_api_layer::log;
 
 namespace openxr_api_layer {
 
+    // Request the layer 'name' for the extensions it provides and append these to the complete list
+    void appendAvailableExtensions(const char * name, PFN_xrGetInstanceProcAddr getInstanceProcAddr, std::unordered_map<std::string, uint32_t> &availableExtensions)
+    {
+        XrResult stillOK{XR_SUCCESS};
+        PFN_xrEnumerateInstanceExtensionProperties xrEnumerateInstanceExtensionProperties;
+        stillOK = getInstanceProcAddr(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties",
+            reinterpret_cast<PFN_xrVoidFunction*>(&xrEnumerateInstanceExtensionProperties));
+        uint32_t extCount{0};
+        stillOK = XR_SUCCEEDED(stillOK) ? xrEnumerateInstanceExtensionProperties(name, 0, &extCount, nullptr) : stillOK;
+        std::vector<XrExtensionProperties> extensions(extCount, {XR_TYPE_EXTENSION_PROPERTIES});
+        stillOK = XR_SUCCEEDED(stillOK) ? xrEnumerateInstanceExtensionProperties(name, extCount, &extCount, extensions.data()) : stillOK;
+        for (const auto& ext: extensions) {
+            // TODO: For now the extensions are added to the list only they are not already in it
+            // It may be interesting to check for the versions and add the highest one
+            availableExtensions.emplace(ext.extensionName, ext.extensionVersion);
+        }
+    }
+
     // Entry point for creating the layer.
     XrResult XRAPI_CALL xrCreateApiLayerInstance(const XrInstanceCreateInfo* const instanceCreateInfo,
                                                  const struct XrApiLayerCreateInfo* const apiLayerInfo,
@@ -62,76 +80,26 @@ namespace openxr_api_layer {
 
         // Only request implicit extensions that are supported.
         //
-        // While the OpenXR standard states that xrEnumerateInstanceExtensionProperties() can be queried without an
-        // instance, this does not stand for API layers, since API layers implementation might rely on the next
-        // xrGetInstanceProcAddr() pointer, which is not (yet) populated if no instance is created.
-        // We create a dummy instance in order to do these checks.
+        // Layers only need to report the extensions they support so ask each layer as well as the runtime for the complete list
         std::vector<std::string> filteredImplicitExtensions;
         if (!implicitExtensions.empty()) {
-            XrInstance dummyInstance = XR_NULL_HANDLE;
+            std::unordered_map<std::string, uint32_t> availableExtensions{};
+            auto info = apiLayerInfo->nextInfo;
+            // Query the extensions properties for each layer in the chain
+            while (info->next != nullptr) {
+                appendAvailableExtensions(info->next->layerName, info->nextGetInstanceProcAddr, availableExtensions);
+                info = info->next;
+            }
+            // Query the extensions properties of the runtime too 
+            appendAvailableExtensions(nullptr, info->nextGetInstanceProcAddr, availableExtensions);
 
-            // Call the chain to create a dummy instance. Request no extensions in order to speed things up.
-            XrInstanceCreateInfo dummyCreateInfo = *instanceCreateInfo;
-            dummyCreateInfo.enabledExtensionCount = 0;
-
-            XrApiLayerCreateInfo chainApiLayerInfo = *apiLayerInfo;
-            chainApiLayerInfo.nextInfo = apiLayerInfo->nextInfo->next;
-
-            if (XR_SUCCEEDED(apiLayerInfo->nextInfo->nextCreateApiLayerInstance(
-                    &dummyCreateInfo, &chainApiLayerInfo, &dummyInstance))) {
-                PFN_xrDestroyInstance xrDestroyInstance;
-                CHECK_XRCMD(apiLayerInfo->nextInfo->nextGetInstanceProcAddr(
-                    dummyInstance, "xrDestroyInstance", reinterpret_cast<PFN_xrVoidFunction*>(&xrDestroyInstance)));
-                PFN_xrGetSystem xrGetSystem = nullptr;
-                CHECK_XRCMD(apiLayerInfo->nextInfo->nextGetInstanceProcAddr(
-                    dummyInstance, "xrGetSystem", reinterpret_cast<PFN_xrVoidFunction*>(&xrGetSystem)));
-                PFN_xrGetSystemProperties xrGetSystemProperties = nullptr;
-                CHECK_XRCMD(apiLayerInfo->nextInfo->nextGetInstanceProcAddr(
-                    dummyInstance,
-                    "xrGetSystemProperties",
-                    reinterpret_cast<PFN_xrVoidFunction*>(&xrGetSystemProperties)));
-
-                // Check the available extensions.
-                PFN_xrEnumerateInstanceExtensionProperties xrEnumerateInstanceExtensionProperties;
-                CHECK_XRCMD(apiLayerInfo->nextInfo->nextGetInstanceProcAddr(
-                    dummyInstance,
-                    "xrEnumerateInstanceExtensionProperties",
-                    reinterpret_cast<PFN_xrVoidFunction*>(&xrEnumerateInstanceExtensionProperties)));
-
-                uint32_t extensionsCount = 0;
-                CHECK_XRCMD(xrEnumerateInstanceExtensionProperties(nullptr, 0, &extensionsCount, nullptr));
-                std::vector<XrExtensionProperties> extensions(extensionsCount, {XR_TYPE_EXTENSION_PROPERTIES});
-                CHECK_XRCMD(xrEnumerateInstanceExtensionProperties(
-                    nullptr, extensionsCount, &extensionsCount, extensions.data()));
-
-                for (const std::string& extensionName : implicitExtensions) {
-                    const auto matchExtensionName = [&](const XrExtensionProperties& properties) {
-                        return properties.extensionName == extensionName;
-                    };
-                    if (std::find_if(extensions.cbegin(), extensions.cend(), matchExtensionName) != extensions.cend()) {
-                        filteredImplicitExtensions.push_back(extensionName);
-                    } else {
-                        Log(fmt::format("Cannot satisfy implicit extension request: {}\n", extensionName));
-                    }
-                }
-
-                // Workaround: the Vive runtime does not seem to like our flow of destroying the instance
-                // mid-initialization. We skip destruction and we will just create a second instance.
-                if (xrGetSystem && xrGetSystemProperties) {
-                    XrSystemGetInfo getInfo{XR_TYPE_SYSTEM_GET_INFO};
-                    getInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-                    XrSystemId systemId;
-                    if (XR_SUCCEEDED(xrGetSystem(dummyInstance, &getInfo, &systemId))) {
-                        XrSystemProperties systemProperties{XR_TYPE_SYSTEM_PROPERTIES};
-                        CHECK_XRCMD(xrGetSystemProperties(dummyInstance, systemId, &systemProperties));
-                        if (std::string(systemProperties.systemName).find("Vive Reality system") != std::string::npos) {
-                            xrDestroyInstance = nullptr;
-                        }
-                    }
-                }
-
-                if (xrDestroyInstance) {
-                    xrDestroyInstance(dummyInstance);
+            for (const std::string& extensionName: implicitExtensions) {
+                // TODO: it may also be interesting to check the extension version
+                if (auto search = availableExtensions.find(extensionName); search != availableExtensions.end()) {
+                    filteredImplicitExtensions.push_back(extensionName);
+                } else {
+                    Log(fmt::format("Cannot satisfy implicit extension request: {}\n", extensionName));
+                    return XR_ERROR_EXTENSION_NOT_PRESENT;
                 }
             }
         }
